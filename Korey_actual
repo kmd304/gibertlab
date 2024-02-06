@@ -1,0 +1,99 @@
+library(tidyverse)
+library(ggplot2)
+library(nls.multstart)
+##Prepare and insert file here
+
+setwd("C:/Users/Katrina/Desktop")
+getwd()
+tpcs <- read.csv("C:/Users/Katrina/Desktop/korey.csv")
+
+Bacs <- unique(tpcs$Bac)
+tpcs <- tpcs %>%
+  filter(Final>=1) %>%
+  mutate(r = log(Final/Initial)) %>%
+  group_by(Bac)%>%
+  mutate(r_scale=10,
+         log_r=log(r+r_scale)) %>%
+  ungroup
+##Display data
+ggplot(tpcs, aes(Temp, log_r)) +
+  geom_point() +
+  theme_bw(base_size = 12) +
+  labs(x = 'Temperature (ºC)',
+       y = 'intrinsic growth rate')
+
+
+TPC_fits <- tpcs %>%
+  group_by(Bac)%>%
+  do(TPC_fit = nls_multstart(log_r ~ a + (E_a/(8.6*10^-5))*(1/298.15-1/(Temp+273.15)) - log(1+exp((E_d/(8.6*10^-5))*(1/Th-1/(Temp+273.15)))),
+                             data = .,
+                             iter = 500,
+                             start_lower = c(a=-10, E_a=0.1, E_d=0.5, Th=285),
+                             start_upper = c(a=10, E_a=4, E_d=10, Th=330),
+                             supp_errors = 'Y',
+                             na.action = na.omit,
+                             lower = c(a=-10, E_a=0, E_d=0, Th=0))) %>%
+  rowwise() %>%
+  mutate(a=coef(TPC_fit)[[1]],
+         E_a=coef(TPC_fit)[[2]],
+         E_d=coef(TPC_fit)[[3]],
+         Th=coef(TPC_fit)[[4]],
+         T_opt=E_d*Th/(E_d+8.6e-5*Th*log(E_d/E_a-1)))
+
+
+pars <- dplyr::select(TPC_fits, -TPC_fit)
+
+TPC_eqn<-function(a, E_a, E_d, Th, Temperature, r_scale){exp(a + (E_a/(8.6*10^-5))*(1/298.15-1/(Temperature+273.15)) - log(1+exp((E_d/(8.6*10^-5))*(1/Th-1/(Temperature+273.15)))))-r_scale}
+
+
+TPC_predicted<-expand.grid(Bac=Bacs,Temperature=seq(0, 50, length.out=500)) %>%
+  left_join(dplyr::select(TPC_fits, -TPC_fit)) %>%
+  left_join(distinct(dplyr::select(tpcs, Bac, r_scale))) %>%
+  mutate(r=TPC_eqn(a, E_a, E_d, Th, Temperature, r_scale)) #%>%
+#filter(r>=-1)
+TPC_summary_spread<-TPC_predicted %>%
+  group_by(Bac)%>%
+  mutate(CT_min=ifelse(lag(r)<0 & r>0, Temperature, NA),
+         CT_max=ifelse(lag(r)>0 & r<0, Temperature, NA),
+         r_peak=max(r)) %>%
+  filter(!is.na(CT_min) | !is.na(CT_max)) %>%
+  dplyr::select(Bac, CT_min, CT_max, r_peak) %>%
+  ungroup() %>%
+  gather(param, param_val, -Bac) %>%
+  drop_na %>%
+  distinct %>%
+  spread(param, param_val) %>%
+  left_join(dplyr::select(TPC_fits, Bac, E_a, E_d, T_opt)) %>%
+  mutate(T_opt=T_opt-273.15, T_range=CT_max-CT_min, TPC_asymmetry=abs((T_opt-CT_min)-(CT_max-T_opt))) %>%
+  arrange(r_peak)
+
+TPC_predicted$Bac <- factor(TPC_predicted$Bac)
+
+
+mean_fitness <- TPC_predicted%>%
+  group_by(Temperature)%>%
+  summarize(meanFit=mean(r), SD =sd(r), dissim=mean(dist(r)))
+
+# Plot TPC
+g_1<-
+  ggplot()+
+  geom_line(data=TPC_predicted, aes(Temperature, r, color =Bac), linewidth=1)+
+  geom_line(data=mean_fitness, aes(Temperature, meanFit), linewidth=1, linetype = "dashed")+
+  scale_x_continuous(limits = c(15,33))+
+  scale_y_continuous(limits = c(0, 2.5))+
+  labs(x="Temperature (C)", y=Intrinsic~growth~rate~(r)~(cells~cell^-1~d^-1)) +
+  theme(plot.background=element_blank(), panel.background=element_blank(),#panel.grid=element_blank(),
+        panel.border=element_rect(color = "black", linewidth=1, fill=NA),
+        axis.text=element_text(size=14), axis.title=element_text(size=16),
+        axis.title.x.top=element_blank(), axis.text.x.top=element_blank(),
+        axis.ticks.length.x.top=unit(0, "cm"),
+        axis.ticks.length=unit(-0.15, "cm"),
+        plot.margin=unit(c(0,0,0,1), "cm"),
+        aspect.ratio=0.55,
+        legend.key=element_blank(),
+        legend.position="right",
+        legend.text=element_text(size=12)
+  )
+
+
+g_1
